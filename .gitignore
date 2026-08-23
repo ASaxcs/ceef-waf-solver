@@ -1,0 +1,5 @@
+node_modules
+vendor/
+browsers/
+*.deb
+*.zip
