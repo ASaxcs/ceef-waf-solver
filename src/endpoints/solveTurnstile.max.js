@@ -34,52 +34,93 @@ function solveTurnstileMax({ url, proxy }) {
         timeout: 45000,
       });
 
-      // Poll for Turnstile token extraction
+      // Poll for Turnstile token or cf_clearance extraction
       let token = null;
+      let cfClearance = null;
+      let finalCookies = [];
+      let pageTitle = "";
+
       for (let i = 0; i < 60; i++) {
-        token = await page.evaluate(() => {
-          // 1. Native Turnstile response input
-          const el = document.querySelector(
-            '[name="cf-turnstile-response"], [name="cf-response"], textarea[name="cf-turnstile-response"], input[name="g-recaptcha-response"]'
-          );
-          if (el && el.value && el.value.length > 20) {
-            return el.value;
-          }
+        // 1. Check cookies for cf_clearance
+        finalCookies = await page.cookies().catch(() => []);
+        cfClearance = finalCookies.find((c) => c.name === "cf_clearance")?.value || null;
+        pageTitle = await page.title().catch(() => "");
 
-          // 2. Global window.turnstile API
-          if (window.turnstile && typeof window.turnstile.getResponse === "function") {
-            try {
-              const res = window.turnstile.getResponse();
-              if (res && res.length > 20) return res;
-            } catch (_) {}
-          }
-
-          // 3. Fallback: scan all inputs for token signatures
-          const inputs = Array.from(document.querySelectorAll("input, textarea"));
-          for (const inp of inputs) {
-            if (inp.value && (inp.value.startsWith("0.") || inp.value.startsWith("1.") || inp.value.startsWith("0x")) && inp.value.length > 50) {
-              return inp.value;
+        // 2. Check DOM for Turnstile token
+        token = await page
+          .evaluate(() => {
+            // 2.1 Native Turnstile response inputs
+            const el = document.querySelector(
+              '[name="cf-turnstile-response"], [name="cf-response"], textarea[name="cf-turnstile-response"], input[name="g-recaptcha-response"]'
+            );
+            if (el && el.value && el.value.length > 20) {
+              return el.value;
             }
-          }
 
-          return null;
-        }).catch(() => null);
+            // 2.2 Global window.turnstile API
+            if (window.turnstile && typeof window.turnstile.getResponse === "function") {
+              try {
+                const res = window.turnstile.getResponse();
+                if (res && res.length > 20) return res;
+              } catch (_) {}
+            }
 
-        if (token) break;
+            // 2.3 Fallback: scan all inputs for token signatures
+            const inputs = Array.from(document.querySelectorAll("input, textarea"));
+            for (const inp of inputs) {
+              if (
+                inp.value &&
+                (inp.value.startsWith("0.") || inp.value.startsWith("1.") || inp.value.startsWith("0x")) &&
+                inp.value.length > 50
+              ) {
+                return inp.value;
+              }
+            }
+
+            return null;
+          })
+          .catch(() => null);
+
+        const isChallengeFinished =
+          (token && token.length > 10) ||
+          cfClearance ||
+          (!pageTitle.includes("Just a moment") &&
+            !pageTitle.includes("Attention Required") &&
+            !pageTitle.includes("Cloudflare Verification") &&
+            pageTitle.length > 0 &&
+            finalCookies.length > 0);
+
+        if (isChallengeFinished) {
+          break;
+        }
+
         await new Promise((r) => setTimeout(r, 500));
       }
 
       isResolved = true;
-      clearInterval(cl);
+      clearTimeout(cl);
+      const finalUrl = page.url();
       await context.close().catch(() => {});
 
-      if (!token || token.length < 10) return reject("Failed to get token");
-      return resolve(token);
+      const resultToken = token || cfClearance;
+      if (!resultToken && !finalCookies.length) {
+        return reject(new Error("Failed to get token or clearance cookie"));
+      }
+
+      return resolve({
+        token: resultToken,
+        turnstileToken: token,
+        cf_clearance: cfClearance,
+        cookies: finalCookies,
+        title: pageTitle,
+        url: finalUrl,
+      });
     } catch (e) {
       if (!isResolved) {
+        isResolved = true;
+        clearTimeout(cl);
         await context.close().catch(() => {});
-        clearInterval(cl);
-        reject(e.message);
+        reject(e?.message ? e : new Error(String(e || "Turnstile-max solving failed")));
       }
     }
   });

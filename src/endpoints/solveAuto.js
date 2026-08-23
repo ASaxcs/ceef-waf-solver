@@ -129,27 +129,43 @@ async function extractSiteKey(url, proxy, customHeaders) {
 }
 
 async function solveAuto({ url, proxy, siteKey, customHeaders }) {
-  let targetSiteKey = siteKey;
-
-  // Step 1: If siteKey not provided, auto-extract it by scanning network & DOM
-  if (!targetSiteKey) {
-    console.log(`[Auto-Mode] Loading ${url} to scan network and extract siteKey...`);
-    targetSiteKey = await extractSiteKey(url, proxy, customHeaders);
+  // If siteKey is explicitly provided by user, use fast Turnstile-Min injection
+  if (siteKey) {
+    console.log(`[Auto-Mode] Explicit siteKey provided (${siteKey}). Running fast Turnstile solver...`);
+    try {
+      const token = await solveTurnstileMin({
+        url,
+        proxy,
+        siteKey,
+      });
+      return {
+        mode: "auto",
+        url,
+        siteKey,
+        token,
+        turnstileToken: token,
+      };
+    } catch (minErr) {
+      console.log(`[Auto-Mode] Fast solver failed (${minErr?.message || minErr}), falling back to full-page max solver...`);
+    }
   }
 
-  // Step 2: Run main turnstile solver logic using url + extracted siteKey
-  console.log(`[Auto-Mode] Running main Turnstile solver with SiteKey: ${targetSiteKey}`);
-  const token = await solveTurnstileMin({
+  // For general websites / WAF / IUAM / pddikti: run full-page real browser solver
+  console.log(`[Auto-Mode] Running real-browser challenge solver on ${url}...`);
+  const maxResult = await solveTurnstileMax({
     url,
     proxy,
-    siteKey: targetSiteKey,
   });
 
   return {
     mode: "auto",
     url,
-    siteKey: targetSiteKey,
-    token,
+    siteKey: siteKey || null,
+    token: maxResult.token || maxResult.turnstileToken || maxResult.cf_clearance,
+    turnstileToken: maxResult.turnstileToken,
+    cf_clearance: maxResult.cf_clearance,
+    cookies: maxResult.cookies,
+    title: maxResult.title,
   };
 }
 
